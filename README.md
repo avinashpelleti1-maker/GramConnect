@@ -34,3 +34,7 @@ When testing the Flutter app on a physical phone, set `PUBLIC_BASE_URL` in `.env
 ## Production hand-off
 
 Set a strong `JWT_SECRET`, restrict CORS, move database credentials to a secret manager, add object storage for images, and enforce password-reset and account-verification policies before deploying publicly.
+
+## Render deployment
+
+The included `render.yaml` deploys the Express app and a linked Postgres database from this repository. It uses Render's free plans for initial testing. The free database expires after 30 days, so upgrade it before production use.
