@@ -14,7 +14,7 @@ There are two clients for this API: the responsive web client in `public/` and t
 - Admin assignment, complaint lifecycle controls, SOS control centre and analytics
 - SOS alerts with location, notifications and a database audit trail
 - Authenticated JPG, PNG and WebP upload endpoint (up to three 10 MB complaint images)
-- PostgreSQL schema, migration script, Docker database and demo seed data
+- PostgreSQL schema, migration script, Docker database and an empty account-seed command
 
 ## Run locally
 
@@ -23,7 +23,7 @@ There are two clients for this API: the responsive web client in `public/` and t
 3. Start PostgreSQL: `docker compose up -d`.
 4. Install server dependencies: `npm install`.
 5. Create the schema: `npm run db:migrate`.
-6. Add demo users: `npm run db:seed`.
+6. Run `npm run db:seed` to verify the database connection (it does not create accounts).
 7. Start the app: `npm run dev`.
 8. Open `http://localhost:3000`.
 
