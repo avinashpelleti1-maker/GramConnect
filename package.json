@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Smart village complaint and worker management system",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "server.js",
   "scripts": {
     "dev": "node --watch server.js",
