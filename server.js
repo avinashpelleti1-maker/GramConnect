@@ -36,6 +36,7 @@ function publicId() { return `GC-${new Date().getFullYear()}-${Math.floor(1000 +
 function alertAdmins(title, body) { return pool.query("INSERT INTO notifications (user_id,title,body) SELECT id,$1,$2 FROM users WHERE role='admin'", [title, body]); }
 function statusTitle(status) { return status.replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase()); }
 function selectedPanchayat(req) { return String(req.headers['x-panchayat-id'] || 'vakadu-balireddypalem').slice(0, 120); }
+function requestedPanchayat(value) { return String(value || 'vakadu-balireddypalem').trim().slice(0, 120) || 'vakadu-balireddypalem'; }
 
 app.get('/api/health', (_, res) => res.json({ ok: true, service: 'GramConnect API' }));
 
@@ -49,13 +50,14 @@ app.post('/api/auth/email', async (req, res, next) => {
     if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
     if (password.length < 8) return res.status(400).json({ error: 'Password must contain at least 8 characters.' });
 
-    let { rows } = await pool.query('SELECT id,full_name,email,phone,role,village,password_hash FROM users WHERE LOWER(email)=LOWER($1)', [email]);
+    let { rows } = await pool.query('SELECT id,full_name,email,phone,role,village,panchayat_id,designation,address,avatar_url,password_hash FROM users WHERE LOWER(email)=LOWER($1)', [email]);
     let user = rows[0];
     if (intent === 'register') {
       if (user) return res.status(409).json({ error: 'An account already exists with this email. Please sign in instead.' });
       if (fullName.length < 2) return res.status(400).json({ error: 'Please enter your name to create an account.' });
       const passwordHash = await bcrypt.hash(password, 12);
-      ({ rows } = await pool.query('INSERT INTO users (email,password_hash,full_name,role,village) VALUES ($1,$2,$3,$4,$5) RETURNING id,full_name,email,phone,role,village', [email, passwordHash, fullName, role, 'Pedda Cheruvu']));
+      const panchayatId = requestedPanchayat(req.body.panchayatId);
+      ({ rows } = await pool.query('INSERT INTO users (email,password_hash,full_name,role,village,panchayat_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,full_name,email,phone,role,village,panchayat_id,designation,address,avatar_url', [email, passwordHash, fullName, role, 'Pedda Cheruvu', panchayatId]));
       user = rows[0];
       if (role === 'worker') await pool.query('INSERT INTO worker_profiles (user_id, skills, experience_years, identity_verified) VALUES ($1,$2,0,false)', [user.id, ['General service']]);
     } else {
@@ -67,6 +69,55 @@ app.post('/api/auth/email', async (req, res, next) => {
 });
 
 app.get('/api/me', required, (req, res) => res.json({ user: req.user }));
+
+app.get('/api/profile', required, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT u.id,u.full_name,u.email,u.phone,u.role,u.village,u.panchayat_id,u.designation,u.address,u.avatar_url,
+      wp.skills,wp.experience_years,wp.available,wp.identity_verified,wp.rating,wp.jobs_completed
+      FROM users u LEFT JOIN worker_profiles wp ON wp.user_id=u.id WHERE u.id=$1`, [req.user.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Profile not found' });
+    res.json({ profile: rows[0] });
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/profile', required, async (req, res, next) => {
+  let client;
+  try {
+    client = await pool.connect();
+    const fullName = String(req.body.fullName ?? req.user.full_name ?? '').trim().slice(0, 120);
+    const phone = String(req.body.phone ?? '').trim().slice(0, 15) || null;
+    const village = String(req.body.village ?? req.user.village ?? '').trim().slice(0, 120);
+    const designation = String(req.body.designation ?? '').trim().slice(0, 100) || null;
+    const address = String(req.body.address ?? '').trim().slice(0, 800) || null;
+    const avatarUrl = String(req.body.avatarUrl ?? '').trim().slice(0, 1200) || null;
+    const panchayatId = requestedPanchayat(req.body.panchayatId || req.user.panchayat_id);
+    if (fullName.length < 2 || village.length < 2) return res.status(400).json({ error: 'Please enter your name and village.' });
+    if (phone && !/^[+0-9][0-9\- ]{7,14}$/.test(phone)) return res.status(400).json({ error: 'Enter a valid mobile number.' });
+
+    await client.query('BEGIN');
+    const { rows } = await client.query(`UPDATE users
+      SET full_name=$1,phone=$2,village=$3,panchayat_id=$4,designation=$5,address=$6,avatar_url=$7
+      WHERE id=$8
+      RETURNING id,full_name,email,phone,role,village,panchayat_id,designation,address,avatar_url`,
+      [fullName, phone, village, panchayatId, designation, address, avatarUrl, req.user.id]);
+    let profile = rows[0];
+    if (profile.role === 'worker') {
+      const available = typeof req.body.available === 'boolean' ? req.body.available : undefined;
+      const skills = Array.isArray(req.body.skills) ? req.body.skills.map(skill => String(skill).trim()).filter(Boolean).slice(0, 8) : undefined;
+      const worker = await client.query(`UPDATE worker_profiles
+        SET available=COALESCE($1,available),skills=COALESCE($2,skills)
+        WHERE user_id=$3
+        RETURNING skills,experience_years,available,identity_verified,rating,jobs_completed`, [available, skills, req.user.id]);
+      profile = { ...profile, ...(worker.rows[0] || {}) };
+    }
+    await client.query('COMMIT');
+    res.json({ profile, user: profile });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23505') return res.status(409).json({ error: 'This mobile number is already linked to another account.' });
+    next(error);
+  } finally { client?.release(); }
+});
 
 app.get('/api/announcements', required, async (req, res, next) => {
   try {
@@ -154,18 +205,37 @@ app.get('/api/complaints/:id/updates', required, async (req, res, next) => {
 });
 
 app.patch('/api/complaints/:id', required, allow('admin', 'worker'), async (req, res, next) => {
+  let client;
   try {
-    const complaint = (await pool.query('SELECT * FROM complaints WHERE id=$1', [req.params.id])).rows[0];
+    client = await pool.connect();
+    const complaint = (await client.query('SELECT * FROM complaints WHERE id=$1', [req.params.id])).rows[0];
     if (!complaint) return res.status(404).json({ error: 'Complaint not found' });
     if (req.user.role === 'worker' && complaint.assigned_worker_id !== req.user.id) return res.status(403).json({ error: 'This job is not assigned to you' });
-    const status = ['under_review','assigned','on_the_way','in_progress','resolved','verification','closed'].includes(req.body.status) ? req.body.status : complaint.status;
-    const workerId = req.user.role === 'admin' && req.body.assignedWorkerId ? req.body.assignedWorkerId : complaint.assigned_worker_id;
-    const { rows } = await pool.query(`UPDATE complaints SET status=$1, assigned_worker_id=$2, priority=$3, updated_at=NOW(), resolved_at=CASE WHEN $1='resolved' THEN NOW() ELSE resolved_at END WHERE id=$4 RETURNING *`, [status, workerId, req.body.priority || complaint.priority, complaint.id]);
-    await pool.query('INSERT INTO complaint_updates (complaint_id,actor_id,status,note,photo_urls) VALUES ($1,$2,$3,$4,$5)', [complaint.id, req.user.id, status, String(req.body.note || '').slice(0, 600), req.body.photoUrls || []]);
-    const citizen = (await pool.query('SELECT id FROM users WHERE id=$1', [complaint.citizen_id])).rows[0];
-    await pool.query('INSERT INTO notifications (user_id,title,body) VALUES ($1,$2,$3)', [citizen.id, `Complaint ${statusTitle(status)}`, `${complaint.public_id} has been updated.`]);
-    res.json({ complaint: rows[0] });
-  } catch (error) { next(error); }
+    const requestedWorkerId = req.user.role === 'admin' ? String(req.body.assignedWorkerId || '').trim() : '';
+    let assignedWorker = null;
+    if (requestedWorkerId) {
+      assignedWorker = (await client.query(`SELECT id,full_name FROM users
+        WHERE id=$1 AND role='worker' AND panchayat_id=$2`, [requestedWorkerId, selectedPanchayat(req)])).rows[0];
+      if (!assignedWorker) return res.status(400).json({ error: 'Choose a valid worker from this Panchayat.' });
+    }
+    const workerId = assignedWorker?.id || complaint.assigned_worker_id;
+    const wasAssigned = Boolean(workerId && String(workerId) !== String(complaint.assigned_worker_id || ''));
+    let status = ['under_review','assigned','on_the_way','in_progress','resolved','verification','closed'].includes(req.body.status) ? req.body.status : complaint.status;
+    if (wasAssigned && ['submitted','under_review'].includes(status)) status = 'assigned';
+
+    await client.query('BEGIN');
+    const { rows } = await client.query(`UPDATE complaints SET status=$1, assigned_worker_id=$2, priority=$3, updated_at=NOW(), resolved_at=CASE WHEN $1='resolved' THEN NOW() ELSE resolved_at END WHERE id=$4 RETURNING *`, [status, workerId, req.body.priority || complaint.priority, complaint.id]);
+    await client.query('INSERT INTO complaint_updates (complaint_id,actor_id,status,note,photo_urls) VALUES ($1,$2,$3,$4,$5)', [complaint.id, req.user.id, status, String(req.body.note || '').slice(0, 600), req.body.photoUrls || []]);
+    await client.query('INSERT INTO notifications (user_id,title,body) VALUES ($1,$2,$3)', [complaint.citizen_id, `Complaint ${statusTitle(status)}`, `${complaint.public_id} has been updated.`]);
+    if (wasAssigned && assignedWorker) {
+      await client.query('INSERT INTO notifications (user_id,title,body) VALUES ($1,$2,$3)', [assignedWorker.id, 'New complaint assigned', `${complaint.public_id}: ${complaint.description.slice(0, 120)}`]);
+    }
+    await client.query('COMMIT');
+    res.json({ complaint: rows[0], workerAssigned: wasAssigned, workerName: assignedWorker?.full_name || null });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    next(error);
+  } finally { client?.release(); }
 });
 
 app.post('/api/complaints/:id/support', required, allow('citizen'), async (req, res, next) => {
@@ -183,7 +253,12 @@ app.post('/api/complaints/:id/support', required, allow('citizen'), async (req, 
 
 app.get('/api/workers', required, async (req, res, next) => {
   try {
-    const { rows } = await pool.query(`SELECT u.id,u.full_name,u.village,wp.skills,wp.experience_years,wp.available,wp.identity_verified,wp.rating,wp.jobs_completed FROM users u JOIN worker_profiles wp ON wp.user_id=u.id WHERE u.role='worker' AND wp.available=true ORDER BY wp.rating DESC,wp.jobs_completed DESC`);
+    const availability = req.user.role === 'citizen' ? 'AND wp.available=true' : '';
+    const { rows } = await pool.query(`SELECT u.id,u.full_name,u.phone,u.village,u.panchayat_id,u.designation,u.address,u.avatar_url,
+      wp.skills,wp.experience_years,wp.available,wp.identity_verified,wp.rating,wp.jobs_completed
+      FROM users u JOIN worker_profiles wp ON wp.user_id=u.id
+      WHERE u.role='worker' AND u.panchayat_id=$1 ${availability}
+      ORDER BY wp.available DESC,wp.rating DESC,wp.jobs_completed DESC`, [selectedPanchayat(req)]);
     res.json({ workers: rows });
   } catch (error) { next(error); }
 });
