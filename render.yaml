@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: gramconnect
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    preDeployCommand: npm run db:migrate
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gramconnect-db
+          property: connectionString
+
+databases:
+  - name: gramconnect-db
+    plan: free
+    databaseName: gramconnect
+    user: gramconnect
