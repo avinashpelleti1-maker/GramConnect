@@ -11,6 +11,7 @@ const { pool } = require('../lib/db');
       ['002_announcements', '002_announcements.sql'],
       ['003_announcement_images', '003_announcement_images.sql'],
       ['004_email_password_auth', '004_email_password_auth.sql'],
+      ['005_shared_profiles', '005_shared_profiles.sql'],
     ];
     for (const [name, file] of migrations) {
       const applied = await pool.query('SELECT 1 FROM schema_migrations WHERE name=$1', [name]);
