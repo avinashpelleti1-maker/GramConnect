@@ -91,7 +91,29 @@ async function loadPanchayats() {
   try { const data = await api('/api/panchayats'); if (!Array.isArray(data.panchayats) || !data.panchayats.length) throw new Error('Panchayat directory unavailable'); state.panchayats = data.panchayats; if (!state.panchayats.some(item => item.id === state.panchayatId)) state.panchayatId = state.panchayats[0]?.id || state.panchayatId; renderPanchayatSelector(); }
   catch (error) { state.panchayats = localPanchayatFallback; renderPanchayatSelector(); }
 }
-function startApp() { $('#auth').classList.add('hidden'); $('#app').classList.remove('hidden'); $('#user-name').textContent = state.user.full_name.split(' ')[0]; $('#user-initial').textContent = state.user.full_name[0].toUpperCase(); renderNav(); loadPanchayats().finally(() => go('home')); }
+async function syncLegacyProfile() {
+  const key = `gc_profile_${state.user.id}`;
+  const syncedKey = `gc_profile_synced_${state.user.id}`;
+  if (localStorage.getItem(syncedKey)) return;
+  let legacy = {};
+  try { legacy = JSON.parse(localStorage.getItem(key) || '{}'); } catch (_) { return; }
+  if (!Object.keys(legacy).length) return;
+  try {
+    const result = await api('/api/profile', { method:'PATCH', body:JSON.stringify({
+      fullName: legacy.name || state.user.full_name,
+      phone: legacy.phone || state.user.phone || '',
+      designation: legacy.title || state.user.designation || '',
+      village: legacy.village || state.user.village || 'Pedda Cheruvu',
+      address: legacy.address || '',
+      avatarUrl: legacy.photo || '',
+      available: typeof legacy.available === 'boolean' ? legacy.available : undefined,
+      panchayatId: state.panchayatId,
+    })});
+    state.user = { ...state.user, ...(result.user || {}) };
+    localStorage.setItem(syncedKey, '1');
+  } catch (_) { /* Keep the local profile intact and retry next time. */ }
+}
+function startApp() { $('#auth').classList.add('hidden'); $('#app').classList.remove('hidden'); $('#user-name').textContent = state.user.full_name.split(' ')[0]; $('#user-initial').textContent = state.user.full_name[0].toUpperCase(); renderNav(); loadPanchayats().finally(async () => { await syncLegacyProfile(); $('#user-name').textContent = state.user.full_name.split(' ')[0]; $('#user-initial').textContent = state.user.full_name[0]?.toUpperCase() || '?'; go('home'); }); }
 function renderNav() { $('#nav').innerHTML = navItems().map(x => `<button class="${x.id === state.page?'active':''}" data-page="${x.id}"><span>${x.label}</span></button>`).join(''); $('#nav').querySelectorAll('button').forEach(b => b.addEventListener('click',() => go(b.dataset.page))); }
 function go(page) { state.page = page; renderNav(); $('#page-title').textContent = ({home:'Home',report:'Report a problem',complaints:state.user.role==='worker'?'My workboard':state.user.role==='admin'?'Complaint management':'My complaints',workers:state.user.role==='admin'?'Worker management':'Find local workers',announcements:'Announcements',analytics:'Analytics',notifications:'Notifications',profile:'My profile'})[page]; $('#page').innerHTML='<div class="panel empty">Loading…</div>'; renderPage().catch(e => { $('#page').innerHTML = `<div class="panel empty">${esc(e.message)}</div>`; }); }
 async function renderPage() { const page = state.page; if (page === 'home') return renderHome(); if (page === 'report') return renderReport(); if (page === 'complaints') return renderComplaints(); if (page === 'workers') return renderWorkers(); if (page === 'announcements') return renderAnnouncements(); if (page === 'analytics') return renderAnalytics(); if (page === 'profile') return renderProfile(); return renderNotifications(); }
@@ -207,7 +229,7 @@ async function renderComplaints() {
   if (!complaints.length) { $('#page').innerHTML = `<section class="panel empty">${state.user.role==='worker'?'No work assigned right now.':'No complaints yet.'}</section>`; return; }
   if (state.user.role === 'admin') {
     $('#page').innerHTML = `<section class="panel"><h2>Assign, review and close complaints</h2><p class="sub">Before/after evidence and citizen voice proof stay with each complaint.</p>${complaints.map(c=>`<div class="admin-item" data-id="${c.id}"><b>${icon[c.category]||'📍'} ${esc(c.description)} <span class="badge ${c.status}">${human(c.status)}</span></b><small>${esc(c.public_id)} · ${esc(c.location_label||c.category)} · ${c.confirmations} confirmations</small>${complaintEvidence(c)}<div><select class="worker-select"><option value="">Assign worker…</option>${workersData.workers.map(w=>`<option value="${w.id}" ${w.id===c.assigned_worker_id?'selected':''}>${esc(w.full_name)} — ${esc((w.skills||[])[0]||'Worker')}</option>`).join('')}</select><select class="status-select">${['under_review','assigned','on_the_way','in_progress','resolved','verification','closed'].map(s=>`<option value="${s}" ${s===c.status?'selected':''}>${human(s)}</option>`).join('')}</select><button class="primary save-complaint">Save</button></div></div>`).join('')}</section>`;
-    document.querySelectorAll('.save-complaint').forEach(b=>b.addEventListener('click',async()=>{const row=b.closest('.admin-item'); try { await api(`/api/complaints/${row.dataset.id}`,{method:'PATCH',body:JSON.stringify({assignedWorkerId:row.querySelector('.worker-select').value || undefined,status:row.querySelector('.status-select').value,note:'Updated by Panchayat admin'})});toast('Complaint updated.');go('complaints');}catch(e){toast(e.message)}}));
+    document.querySelectorAll('.save-complaint').forEach(b=>b.addEventListener('click',async()=>{const row=b.closest('.admin-item'); try { b.disabled=true; b.textContent='Saving…'; const result=await api(`/api/complaints/${row.dataset.id}`,{method:'PATCH',body:JSON.stringify({assignedWorkerId:row.querySelector('.worker-select').value || undefined,status:row.querySelector('.status-select').value,note:'Updated by Panchayat admin'})});toast(result.workerAssigned?`${result.workerName} assigned and notified.`:'Complaint updated.');go('complaints');}catch(e){b.disabled=false;b.textContent='Save';toast(e.message)}}));
   } else if (state.user.role === 'worker') {
     $('#page').innerHTML = `<section class="panel"><h2>My assigned jobs</h2><p class="sub">When work is resolved, attach the after photo as proof of completion.</p>${complaints.map(c=>`<div class="admin-item" data-id="${c.id}"><b>${icon[c.category]||'📍'} ${esc(c.description)} <span class="badge ${c.status}">${human(c.status)}</span></b><small>${esc(c.public_id)} · ${esc(c.location_label||'Location shared')} · Citizen: ${esc(c.citizen_name)} · ${esc(c.reporter_phone||'')}</small><div><select class="status-select">${['on_the_way','in_progress','resolved'].map(s=>`<option value="${s}" ${s===c.status?'selected':''}>${human(s)}</option>`).join('')}</select><input class="after-photo" type="file" accept="image/jpeg,image/png,image/webp" multiple title="After photo"><button class="primary update-job">Update job</button></div></div>`).join('')}</section>`;
     document.querySelectorAll('.update-job').forEach(b=>b.addEventListener('click',async()=>{const row=b.closest('.admin-item'),status=row.querySelector('.status-select').value,files=[...row.querySelector('.after-photo').files];if(status==='resolved'&&!files.length)return toast('Attach at least one after photo before completing work.');try{b.disabled=true;b.textContent=files.length?'Uploading…':'Updating…';const photoUrls=files.length?await uploadImages(files):[];if(status==='resolved'&&photoUrls.length)saveAfterPhotos(row.dataset.id,photoUrls);await api(`/api/complaints/${row.dataset.id}`,{method:'PATCH',body:JSON.stringify({status,photoUrls,note:'Progress updated by assigned worker'})});toast(status==='resolved'?'Work completed with after photo.':'Progress shared with the citizen.');go('complaints');}catch(e){b.disabled=false;b.textContent='Update job';toast(e.message)}}));
@@ -228,21 +250,24 @@ async function renderWorkersLegacyAvailability() {
   $('#page').innerHTML = `<section class="panel" style="max-width:920px"><h2>${state.user.role==='admin'?'Verified worker directory':'Find local workers'}</h2><p class="sub">${state.user.role==='admin'?'Availability and identity status for your Panchayat workforce.':'Trusted workers available in and around your village.'}</p>${workers.length?workers.map(w=>`<div class="worker"><div class="face">${(w.skills||[]).includes('Electricity')?'⚡':'👷'}</div><div><b>${esc(w.full_name)} ${w.identity_verified?'✓':''}</b><small>${esc((w.skills||[]).join(' · '))} · ${w.rating} ★ · ${w.jobs_completed} jobs completed · ${w.available?'Available now':'Unavailable'}</small></div><button class="ghost">${state.user.role==='admin'?'Manage':'Contact'}</button></div>`).join(''):'<div class="empty">No workers are currently available.</div>'}</section>`;
 }
 
-function profileStorageKey() { return `gc_profile_${state.user.id}`; }
-function getProfile() { const defaults = { citizen: 'Citizen', worker: 'Electrician / Local Worker', admin: 'Panchayat Admin / MRO' }; let saved = {}; try { saved = JSON.parse(localStorage.getItem(profileStorageKey()) || '{}'); } catch (_) {} return { name: state.user.full_name, phone: state.user.phone || '', title: defaults[state.user.role] || state.user.role, village: state.user.village || '', address: '', photo: '', ...saved }; }
-function renderProfile() {
-  const profile = getProfile();
+async function renderProfile() {
+  const result = await api('/api/profile');
+  const record = result.profile || state.user;
+  const defaults = { citizen: 'Citizen', worker: 'Electrician / Local Worker', admin: 'Panchayat Admin / MRO' };
+  const profile = { name:record.full_name || state.user.full_name, phone:record.phone || '', title:record.designation || defaults[state.user.role], village:record.village || state.user.village || '', address:record.address || '', photo:record.avatar_url || '', available:record.available !== false };
   const avatar = profile.photo ? `<img src="${esc(profile.photo)}" alt="Profile photo">` : esc(profile.name.slice(0, 1).toUpperCase());
-  $('#page').innerHTML = `<section class="panel profile-card"><div class="profile-heading"><div class="profile-avatar" id="profile-avatar">${avatar}</div><div><h2>${esc(profile.name)}</h2><p>${human(state.user.role)} · ${esc(profile.village)}</p></div></div><form id="profile-form"><input id="profile-photo-file" type="file" accept="image/jpeg,image/png,image/webp" hidden><button type="button" class="ghost" id="change-profile-photo">Change profile photo</button><div class="fields"><label>Full name<input id="profile-name" required maxlength="120" value="${esc(profile.name)}"></label><label>Mobile number<input id="profile-phone" required inputmode="tel" maxlength="15" value="${esc(profile.phone)}"></label><label>Role / designation<input id="profile-title" required maxlength="100" value="${esc(profile.title)}" placeholder="e.g. Electrician, MRO, Citizen"></label><label>Village / Panchayat<input id="profile-village" required maxlength="120" value="${esc(profile.village)}" placeholder="Your village or Panchayat"></label><label class="full">Address<textarea id="profile-address" placeholder="House number, street, village, mandal, district">${esc(profile.address)}</textarea></label></div><div class="form-footer"><button class="primary" type="submit">Save profile</button></div></form></section>`;
-  let photo = profile.photo;
+  const availability = state.user.role === 'worker' ? `<label class="full worker-availability"><input id="profile-available" type="checkbox" ${profile.available ? 'checked' : ''}> Available to receive new jobs and consultation calls</label>` : '';
+  $('#page').innerHTML = `<section class="panel profile-card"><div class="profile-heading"><div class="profile-avatar" id="profile-avatar">${avatar}</div><div><h2>${esc(profile.name)}</h2><p>${human(state.user.role)} · ${esc(profile.village)}</p></div></div><form id="profile-form"><input id="profile-photo-file" type="file" accept="image/jpeg,image/png,image/webp" hidden><button type="button" class="ghost" id="change-profile-photo">Change profile photo</button><div class="fields"><label>Full name<input id="profile-name" required maxlength="120" value="${esc(profile.name)}"></label><label>Mobile number<input id="profile-phone" required inputmode="tel" maxlength="15" value="${esc(profile.phone)}" placeholder="Enter mobile number"></label><label>Role / designation<input id="profile-title" required maxlength="100" value="${esc(profile.title)}" placeholder="e.g. Electrician, MRO, Citizen"></label><label>Village / Panchayat<input id="profile-village" required maxlength="120" value="${esc(profile.village)}" placeholder="Your village or Panchayat"></label><label class="full">Address<textarea id="profile-address" placeholder="House number, street, village, mandal, district">${esc(profile.address)}</textarea></label>${availability}</div><div class="form-footer"><button class="primary" type="submit">Save profile</button></div></form></section>`;
+  let photoUrl = profile.photo;
+  let newPhoto = null;
   $('#change-profile-photo').addEventListener('click', () => $('#profile-photo-file').click());
-  $('#profile-photo-file').addEventListener('change', event => { const file = event.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { photo = reader.result; $('#profile-avatar').innerHTML = `<img src="${esc(photo)}" alt="Profile photo">`; }; reader.readAsDataURL(file); });
-  $('#profile-form').addEventListener('submit', event => { event.preventDefault(); const updated = { name: $('#profile-name').value.trim(), phone: $('#profile-phone').value.trim(), title: $('#profile-title').value.trim(), village: $('#profile-village').value.trim(), address: $('#profile-address').value.trim(), photo }; localStorage.setItem(profileStorageKey(), JSON.stringify(updated)); state.user.full_name = updated.name; state.user.phone = updated.phone; state.user.village = updated.village; $('#user-name').textContent = updated.name.split(' ')[0]; $('#user-initial').textContent = updated.name[0]?.toUpperCase() || '?'; toast('Profile saved.'); go('profile'); });
+  $('#profile-photo-file').addEventListener('change', event => { const file = event.target.files[0]; if (!file) return; newPhoto = file; const reader = new FileReader(); reader.onload = () => { $('#profile-avatar').innerHTML = `<img src="${esc(reader.result)}" alt="Profile photo">`; }; reader.readAsDataURL(file); });
+  $('#profile-form').addEventListener('submit', async event => { event.preventDefault(); const saveButton = $('#profile-form button[type="submit"]'); try { saveButton.disabled=true; saveButton.textContent='Saving…'; if (newPhoto) photoUrl = (await uploadImages([newPhoto]))[0] || photoUrl; const result = await api('/api/profile',{method:'PATCH',body:JSON.stringify({fullName:$('#profile-name').value.trim(),phone:$('#profile-phone').value.trim(),designation:$('#profile-title').value.trim(),village:$('#profile-village').value.trim(),address:$('#profile-address').value.trim(),avatarUrl:photoUrl,panchayatId:state.panchayatId,available:state.user.role==='worker' ? $('#profile-available').checked : undefined})}); state.user = { ...state.user, ...(result.user || result.profile || {}) }; $('#user-name').textContent = state.user.full_name.split(' ')[0]; $('#user-initial').textContent = state.user.full_name[0]?.toUpperCase() || '?'; toast('Profile saved and shared with your Panchayat.'); go('profile'); } catch (error) { saveButton.disabled=false; saveButton.textContent='Save profile'; toast(error.message || 'Profile could not be saved.'); } });
 }
 
 async function renderAnalytics() { const {stats}=await api('/api/admin/dashboard'); const cats=stats.by_category||[]; $('#page').innerHTML=`<div class="admin-grid"><div class="stat"><strong>${stats.active_complaints}</strong><span>Open complaints</span></div><div class="stat"><strong>${stats.resolved_today}</strong><span>Closed today</span></div><div class="stat"><strong>${stats.workers_online}</strong><span>Worker availability</span></div><div class="stat"><strong>4.7 ★</strong><span>Average worker rating</span></div></div><div class="two-col"><section class="panel"><h2>Complaints by department</h2><div class="chart">${cats.map(x=>`<div class="bar" style="height:${Math.max(24,x.count*18)}px"><small>${esc(x.category.slice(0,8))}</small></div>`).join('')}</div></section><section class="panel"><h2>Performance note</h2><p class="sub">Resolution time, village heatmaps and monthly trends are ready for a mapping and BI integration.</p><div class="notification"><b>Community verification boosts priority</b><p>Complaints with 5+ confirmations are automatically raised to High.</p></div></section></div>`; }
 async function renderNotifications() { const {notifications}=await api('/api/notifications'); $('#notification-count').style.display=notifications.some(n=>!n.is_read)?'block':'none'; $('#page').innerHTML=`<section class="panel" style="max-width:820px"><h2>Notification centre</h2>${notifications.length?notifications.map(n=>`<div class="notification"><b>${esc(n.title)}</b><p>${esc(n.body)}</p><small>${date(n.created_at)}</small></div>`).join(''):'<div class="empty">You’re all caught up.</div>'}</section>`; }
-function publicWorkerProfile(worker) { let saved = {}; try { saved = JSON.parse(localStorage.getItem(`gc_profile_${worker.id}`) || '{}'); } catch (_) {} const fallbackPhone = { 'worker-1': '9000000002', 'worker-2': '9000000003' }[worker.id] || ''; return { name: worker.full_name, phone: fallbackPhone, title: (worker.skills || []).join(' · ') || 'Local Worker', village: worker.village || '', address: '', photo: '', ...saved }; }
+function publicWorkerProfile(worker) { return { name:worker.full_name, phone:worker.phone || '', title:worker.designation || (worker.skills || []).join(' · ') || 'Local Worker', village:worker.village || '', address:worker.address || '', photo:worker.avatar_url || '', available:worker.available !== false }; }
 async function renderWorkersLegacyContacts() { const {workers} = await api('/api/workers'); $('#page').innerHTML = `<section class="panel" style="max-width:920px"><h2>${state.user.role==='admin'?'Verified worker directory':'Find local workers'}</h2><p class="sub">${state.user.role==='admin'?'Worker profile details are available for Panchayat coordination.':'See local workers, their role, village, and mobile number to consult them directly.'}</p>${workers.length?workers.map(w=>{const profile=publicWorkerProfile(w);const face=profile.photo?`<img src="${esc(profile.photo)}" alt="${esc(profile.name)}">`:((w.skills||[]).includes('Electricity')?'⚡':'👷');return `<div class="worker"><div class="face">${face}</div><div><b>${esc(profile.name)} ${w.identity_verified?'✓':''}</b><small>${esc(profile.title)} · ${esc(profile.village || 'Village not set')} · ${esc(profile.phone || 'Mobile not set')}</small><small>${w.rating} ★ · ${w.jobs_completed} jobs completed · ${w.available?'Available now':'Unavailable'}</small></div>${profile.phone?`<a class="ghost worker-contact" href="tel:${esc(profile.phone)}">Call</a>`:`<span class="ghost">No number</span>`}</div>`;}).join(''):'<div class="empty">No workers are currently available.</div>'}</section>`; }
 function workerRatings() {
   try { return JSON.parse(localStorage.getItem('gc_worker_ratings') || '{}'); } catch (_) { return {}; }
@@ -308,7 +333,7 @@ function publicWorkerProfileLegacy(worker) {
 }
 async function renderWorkers() {
   const { workers } = await api('/api/workers');
-  const visible = workers.filter(w => publicWorkerProfile(w).available !== false || (state.user.role === 'worker' && w.id === state.user.id));
+  const visible = workers;
   const cards = visible.map(w => {
     const profile = publicWorkerProfile(w);
     const rating = workerRating(w);
@@ -323,13 +348,24 @@ async function renderWorkers() {
   const heading = state.user.role === 'admin' ? 'Verified worker directory' : 'Find local workers';
   const subtitle = state.user.role === 'worker' ? 'Set your availability so Citizens and Admins know whether they can consult you.' : state.user.role === 'admin' ? 'Current worker profiles, availability and community ratings.' : 'Consult available local workers and rate a worker after service is complete.';
   $('#page').innerHTML = `<section class="panel" style="max-width:920px"><h2>${heading}</h2><p class="sub">${subtitle}</p>${cards || '<div class="empty">No workers are currently available.</div>'}</section>`;
-  document.querySelectorAll('.toggle-availability').forEach(button => button.addEventListener('click', () => {
-    const id = button.closest('.worker').dataset.workerId;
-    let profile = {}; try { profile = JSON.parse(localStorage.getItem(`gc_profile_${id}`) || '{}'); } catch (_) {}
-    profile.available = profile.available === false;
-    localStorage.setItem(`gc_profile_${id}`, JSON.stringify(profile));
-    toast(`You are now marked ${profile.available ? 'available' : 'unavailable'}.`);
-    renderWorkers();
+  document.querySelectorAll('.toggle-availability').forEach(button => button.addEventListener('click', async () => {
+    const worker = workers.find(item => item.id === button.closest('.worker').dataset.workerId);
+    if (!worker) return;
+    const nextAvailability = worker.available === false;
+    try {
+      button.disabled = true;
+      button.textContent = 'Saving…';
+      await api('/api/profile', { method:'PATCH', body:JSON.stringify({
+        fullName:state.user.full_name,
+        phone:state.user.phone || '',
+        designation:state.user.designation || (worker.skills || []).join(' · ') || 'Local Worker',
+        village:state.user.village || worker.village || 'Pedda Cheruvu',
+        panchayatId:state.panchayatId,
+        available:nextAvailability,
+      })});
+      toast(`You are now marked ${nextAvailability ? 'available' : 'unavailable'}.`);
+      renderWorkers();
+    } catch (error) { button.disabled = false; button.textContent = 'Try again'; toast(error.message || 'Availability could not be updated.'); }
   }));
   document.querySelectorAll('.worker-contact').forEach(button => button.addEventListener('click', () => {
     const worker = workers.find(w => w.id === button.closest('.worker').dataset.workerId);
